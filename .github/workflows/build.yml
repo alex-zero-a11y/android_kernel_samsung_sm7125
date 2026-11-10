@@ -1,0 +1,124 @@
+name: Build kernel (SukiSU-Ultra)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [a52q, a72q]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev \
+            libelf-dev python3 cpio zip zstd wget
+
+      # drivers/kernelsu in the repo is a symlink to ../KernelSU/kernel,
+      # so SukiSU-Ultra has to be cloned into the repo root.
+      # Full history is needed: SukiSU's Kbuild derives its version
+      # from the commit count.
+      - name: Fetch SukiSU-Ultra (main)
+        run: |
+          git clone --filter=blob:none --branch main \
+            https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
+          git -C KernelSU fetch --tags --quiet
+          git -C KernelSU log -1 --format='SukiSU-Ultra %h %ad %s' --date=short
+          test -f drivers/kernelsu/Kconfig
+
+      - name: Download prebuilt Google clang
+        run: |
+          wget -q -O llvm-aosp.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/mirror-goog-main-llvm-toolchain-source/clang-r596125.tar.gz
+          mkdir llvm-aosp
+          tar -xzf llvm-aosp.tar.gz -C llvm-aosp
+          rm llvm-aosp.tar.gz
+          llvm-aosp/bin/clang --version | head -1
+
+      - name: Configure
+        run: |
+          export PATH="$PWD/llvm-aosp/bin:$PATH"
+          make -j"$(nproc)" ARCH=arm64 O=out LLVM=1 \
+            vendor/lineage-${{ matrix.target }}_defconfig
+          # CONFIG_KSU silently disappears if its dependencies are not met
+          grep -E '^CONFIG_(KPROBES|KSU)=' out/.config
+          grep -q '^CONFIG_KSU=y' out/.config
+
+      - name: Build kernel
+        run: |
+          export PATH="$PWD/llvm-aosp/bin:$PATH"
+          make -j"$(nproc)" ARCH=arm64 O=out LLVM=1 all
+
+      - name: Build dtbo.img
+        run: |
+          mkdir -p dist
+          DTBO_FILES=$(find out/arch/arm64/boot/dts/samsung \
+            -name "atoll-sec-${{ matrix.target }}-*-overlay-*.dtbo" | sort)
+          [ -n "$DTBO_FILES" ] || { echo "No DTBO files found"; exit 1; }
+          chmod +x tools/mkdtimg
+          tools/mkdtimg create dist/dtbo-${{ matrix.target }}.img \
+            --page_size=4096 $DTBO_FILES
+
+      - name: Collect output
+        run: |
+          cp out/arch/arm64/boot/Image dist/Image-${{ matrix.target }}
+          [ -f out/arch/arm64/boot/Image.gz ] && \
+            cp out/arch/arm64/boot/Image.gz dist/Image.gz-${{ matrix.target }} || true
+          cp out/arch/arm64/boot/dts/qcom/atoll-ab-idp.dtb dist/dtb-${{ matrix.target }}
+          cp out/include/config/kernel.release dist/kernel.release-${{ matrix.target }}
+          cp out/.config dist/config-${{ matrix.target }}
+          ls -l dist
+
+      - name: Package AnyKernel3 zip
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
+          rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE
+          cp dist/Image-${{ matrix.target }} ak3/Image
+          cp dist/dtb-${{ matrix.target }} ak3/dtb
+          cp dist/dtbo-${{ matrix.target }}.img ak3/dtbo.img
+          cat > ak3/anykernel.sh <<'AKEOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=SukiSU-Ultra kernel for Galaxy @TARGET@
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=@TARGET@
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          BLOCK=/dev/block/bootdevice/by-name/boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          dump_boot;
+          write_boot;
+
+          BLOCK=/dev/block/bootdevice/by-name/dtbo;
+          flash_generic dtbo;
+          AKEOF
+          sed -i 's/^          //' ak3/anykernel.sh
+          sed -i "s/@TARGET@/${{ matrix.target }}/g" ak3/anykernel.sh
+          cd ak3
+          zip -r9 ../dist/SukiSU-kernel-${{ matrix.target }}.zip . -x '*.git*'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.target }}
+          path: dist/*
