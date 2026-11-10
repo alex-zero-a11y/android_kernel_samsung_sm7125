@@ -27,13 +27,13 @@ jobs:
       # so SukiSU-Ultra has to be cloned into the repo root.
       # Full history is needed: SukiSU's Kbuild derives its version
       # from the commit count.
-      - name: Fetch SukiSU-Ultra (main)
-        run: |
-          git clone --filter=blob:none --branch main \
-            https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
-          git -C KernelSU fetch --tags --quiet
-          git -C KernelSU log -1 --format='SukiSU-Ultra %h %ad %s' --date=short
-          test -f drivers/kernelsu/Kconfig
+      # - name: Fetch SukiSU-Ultra (main)
+      #   run: |
+      #     git clone --filter=blob:none --branch main \
+      #       https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
+      #     git -C KernelSU fetch --tags --quiet
+      #     git -C KernelSU log -1 --format='SukiSU-Ultra %h %ad %s' --date=short
+      #     test -f drivers/kernelsu/Kconfig
 
       - name: Download prebuilt Google clang
         run: |
